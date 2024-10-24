@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Human Detection Assistant with Camera</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f0f0f0;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            text-align: center;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+        }
+        #status, #result {
+            margin-top: 10px;
+            font-style: italic;
+        }
+        button {
+            margin: 10px 5px;
+            padding: 10px 20px;
+            font-size: 1rem;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+            margin: 20px auto 0;
+        }
+        #videoElement {
+            width: 100%;
+            height: auto;
+            background-color: #666;
+        }
+        #canvasElement {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #debugInfo {
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 0.8rem;
+        }
+
+        @media (max-width: 600px) {
+            h2 {
+                font-size: 1.2rem;
+            }
+            button {
+                font-size: 0.9rem;
+                padding: 8px 16px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Human Detection Assistant with Camera</h2>
+        <button id="cameraButton">Start/Stop Camera</button>
+        <button id="switchCameraButton" style="display:none;">Switch Camera</button>
+        <div id="status"></div>
+        <div id="result"></div>
+        <div class="video-container">
+            <video id="videoElement" autoplay playsinline></video>
+            <canvas id="canvasElement"></canvas>
+        </div>
+        <div id="debugInfo"></div>
+    </div>
+
+    <script>
+        const cameraButton = document.getElementById('cameraButton');
+        const switchCameraButton = document.getElementById('switchCameraButton');
+        const statusDiv = document.getElementById('status');
+        const resultDiv = document.getElementById('result');
+        const videoElement = document.getElementById('videoElement');
+        const canvasElement = document.getElementById('canvasElement');
+        const ctx = canvasElement.getContext('2d');
+
+        let cameraActive = false;
+        let currentCameraIndex = 0;
+        let availableCameras = [];
+        let model;
+        let detectionInterval;
+        let lastAlertTime = 0;
+
+        // Load COCO-SSD model
+        cocoSsd.load().then(loadedModel => {
+            model = loadedModel;
+            console.log('COCO-SSD model loaded');
+        });
+
+        async function checkMultipleCameras() {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                console.log("enumerateDevices() not supported.");
+                return;
+            }
+
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                availableCameras = devices.filter(device => device.kind === 'videoinput');
+                if (availableCameras.length > 1) {
+                    switchCameraButton.style.display = 'inline-block';
+                }
+            } catch (err) {
+                console.error(`${err.name}: ${err.message}`);
+            }
+        }
+
+        checkMultipleCameras();
+
+        async function switchCamera() {
+            if (availableCameras.length < 2) return;
+
+            currentCameraIndex = (currentCameraIndex + 1) % availableCameras.length;
+            if (cameraActive) {
+                stopCamera();
+                await startCamera();
+            }
+        }
+
+        async function startCamera() {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                try {
+                    const constraints = {
+                        video: {
+                            deviceId: availableCameras.length > 0 ? { exact: availableCameras[currentCameraIndex].deviceId } : undefined
+                        }
+                    };
+
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    videoElement.srcObject = stream;
+                    videoElement.onloadedmetadata = function(e) {
+                        videoElement.play();
+                        cameraActive = true;
+                        cameraButton.textContent = "Stop Camera";
+                        resultDiv.textContent = "Camera turned on.";
+                        
+                        canvasElement.width = videoElement.videoWidth;
+                        canvasElement.height = videoElement.videoHeight;
+                        
+                        // Start human detection
+                        detectionInterval = setInterval(detectHumans, 1000); // Check every second
+                    };
+                } catch (error) {
+                    console.error("Error accessing the camera", error);
+                    resultDiv.textContent = "Error accessing the camera.";
+                }
+            } else {
+                resultDiv.textContent = "Camera access not supported in this browser.";
+            }
+        }
+
+        function stopCamera() {
+            if (cameraActive) {
+                const stream = videoElement.srcObject;
+                const tracks = stream.getTracks();
+
+                tracks.forEach(function(track) {
+                    track.stop();
+                });
+
+                videoElement.srcObject = null;
+                cameraActive = false;
+                cameraButton.textContent = "Start Camera";
+                resultDiv.textContent = "Camera turned off.";
+                
+                clearInterval(detectionInterval);
+                ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            }
+        }
+
+        async function detectHumans() {
+            if (!cameraActive || !model) return;
+
+            const predictions = await model.detect(videoElement);
+            
+            ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            let humanDetected = false;
+            
+            predictions.forEach(prediction => {
+                if (prediction.class === 'person') {
+                    humanDetected = true;
+                    ctx.beginPath();
+                    ctx.rect(...prediction.bbox);
+                    ctx.lineWidth = 2;
+                    ctx.strokeStyle = 'red';
+                    ctx.fillStyle = 'red';
+                    ctx.stroke();
+                    ctx.fillText(
+                        `${prediction.class} (${Math.round(prediction.score * 100)}%)`,
+                        prediction.bbox[0],
+                        prediction.bbox[1] > 10 ? prediction.bbox[1] - 5 : 10
+                    );
+                }
+            });
+
+            if (humanDetected) {
+                speakAlert();
+            }
+        }
+
+        function speakAlert() {
+            const now = Date.now();
+            if (now - lastAlertTime > 3000) { // Ensure at least 3 seconds between alerts
+                const utterance = new SpeechSynthesisUtterance("Human detected");
+                utterance.rate = 1.2; // Slightly faster than normal speech
+                speechSynthesis.speak(utterance);
+                lastAlertTime = now;
+            }
+        }
+
+        cameraButton.addEventListener('click', async () => {
+            if (cameraActive) {
+                stopCamera();
+            } else {
+                await startCamera();
+            }
+        });
+
+        switchCameraButton.addEventListener('click', switchCamera);
+    </script>
+</body>
+</html>
